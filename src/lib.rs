@@ -30,10 +30,10 @@
 //! ```
 //!
 //! ### Controlling verbosity
-//! The default verbosity is configured via the `RUST_BACKTRACE` environment
-//! variable. An unset `RUST_BACKTRACE` corresponds to
-//! [minimal](Verbosity::Minimal), `RUST_BACKTRACE=1` to
-//! [medium](Verbosity::Medium) and `RUST_BACKTRACE=full` to
+//! The default verbosity is configured via the `RUST_LIB_BACKTRACE` environment
+//! variable. An unset `RUST_LIB_BACKTRACE` corresponds to
+//! [minimal](Verbosity::Minimal), `RUST_LIB_BACKTRACE=1` to
+//! [medium](Verbosity::Medium) and `RUST_LIB_BACKTRACE=full` to
 //! [full](Verbosity::Full) verbosity levels.
 
 use backtrace;
@@ -70,9 +70,9 @@ pub enum Verbosity {
 }
 
 impl Verbosity {
-    /// Get the verbosity level from the `RUST_BACKTRACE` env variable.
+    /// Get the verbosity level from the `RUST_LIB_BACKTRACE` env variable.
     pub fn from_env() -> Self {
-        match std::env::var("RUST_BACKTRACE") {
+        match std::env::var("RUST_LIB_BACKTRACE") {
             Ok(ref x) if x == "full" => Verbosity::Full,
             Ok(_) => Verbosity::Medium,
             Err(_) => Verbosity::Minimal,
@@ -112,13 +112,14 @@ pub fn install_with_settings(settings: Settings) {
 // [Backtrace frame]                                                                              //
 // ============================================================================================== //
 
-struct Frame {
+struct Frame<'a> {
     name: Option<String>,
     lineno: Option<u32>,
     filename: Option<PathBuf>,
+    settings: &'a Settings,
 }
 
-impl Frame {
+impl Frame<'_> {
     /// Heuristically determine whether the frame is likely to be part of a
     /// dependency.
     ///
@@ -191,7 +192,14 @@ impl Frame {
         ];
 
         match self.name.as_ref() {
-            Some(name) => SYM_PREFIXES.iter().any(|x| name.starts_with(x)),
+            Some(name) => {
+                SYM_PREFIXES.iter().any(|x| name.starts_with(x))
+                    || self
+                        .settings
+                        .custom_post_panic
+                        .iter()
+                        .any(|x| name.starts_with(x))
+            }
             None => false,
         }
     }
@@ -242,13 +250,13 @@ impl Frame {
                     f,
                     "{}",
                     s.colors.selected_src_ln.apply_to(format_args!(
-                        "{:>8} > {}",
+                        "{:>10} > {}",
                         cur_line_no,
                         line.unwrap()
                     ))
                 )?;
             } else {
-                writeln!(f, "{:>8} │ {}", cur_line_no, line.unwrap())?;
+                writeln!(f, "{:>10} │ {}", cur_line_no, line.unwrap())?;
             }
         }
 
@@ -259,7 +267,7 @@ impl Frame {
         let is_dependency_code = self.is_dependency_code();
 
         // Print frame index.
-        write!(f, "{:>2}: ", i)?;
+        write!(f, "{:>4}: ", i)?;
 
         let name = self
             .name
@@ -304,9 +312,9 @@ impl Frame {
             let lineno = self
                 .lineno
                 .map_or("<unknown line>".to_owned(), |x| x.to_string());
-            writeln!(f, "    at {}:{}", filestr, lineno)?;
+            writeln!(f, "      at {}:{}", filestr, lineno)?;
         } else {
-            writeln!(f, "    at <unknown source file>")?;
+            writeln!(f, "      at <unknown source file>")?;
         }
 
         // Maybe print source.
@@ -381,6 +389,7 @@ pub struct Settings {
     verbosity: Verbosity,
     strip_function_hash: bool,
     colors: ColorScheme,
+    custom_post_panic: Vec<String>,
 }
 
 impl Default for Settings {
@@ -390,6 +399,7 @@ impl Default for Settings {
             message: "The application panicked (crashed).".to_owned(),
             strip_function_hash: false,
             colors: ColorScheme::classic(),
+            custom_post_panic: vec![],
         }
     }
 }
@@ -424,6 +434,16 @@ impl Settings {
     /// Defaults to `"The application panicked (crashed)"`.
     pub fn message(mut self, message: impl Into<String>) -> Self {
         self.message = message.into();
+        self
+    }
+
+    pub fn add_post_panic_frames<T, A>(mut self, frames: T) -> Self
+    where
+        T: IntoIterator<Item = A>,
+        A: ToString,
+    {
+        let frames = frames.into_iter().map(|frame| frame.to_string());
+        self.custom_post_panic.extend(frames);
         self
     }
 
@@ -467,6 +487,7 @@ impl<'a> fmt::Display for BacktracePrinter<'a> {
                 name: sym.name().map(|x| x.to_string()),
                 lineno: sym.lineno(),
                 filename: sym.filename().map(|x| x.into()),
+                settings: self.settings,
             })
             .collect();
 
@@ -571,7 +592,7 @@ impl<'a> fmt::Display for PanicPrinter<'a> {
             writeln!(
                 f,
                 "\nBacktrace omitted. Run with {} environment variable to display it",
-                self.s.colors.env_var.apply_to("RUST_BACKTRACE=1")
+                self.s.colors.env_var.apply_to("RUST_LIB_BACKTRACE=1")
             )?;
         }
         if self.s.verbosity <= Verbosity::Medium {
@@ -583,7 +604,7 @@ impl<'a> fmt::Display for PanicPrinter<'a> {
             writeln!(
                 f,
                 "Run with {} to include source snippets.",
-                self.s.colors.env_var.apply_to("RUST_BACKTRACE=full")
+                self.s.colors.env_var.apply_to("RUST_LIB_BACKTRACE=full")
             )?;
         }
 
